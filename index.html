@@ -94,8 +94,8 @@ html,body{min-height:100%;overflow-x:hidden} .workspace{display:block;padding:18
 <p class="status" id="controlStatus" role="status"></p>
 <div class="field"><label for="exportMode">图片尺寸</label><select id="exportMode"><option value="auto">自动匹配当前设备屏幕</option><option value="original">原始 931 × 2048</option><option value="custom">自定义宽高</option></select></div>
 <div class="export-grid" id="customExportSize" hidden><div><label for="exportWidth">宽度（px）</label><input type="number" id="exportWidth" min="240" max="4096" value="931"></div><div><label for="exportHeight">高度（px）</label><input type="number" id="exportHeight" min="320" max="8192" value="2048"></div></div>
-<button class="ctrl-button export" type="button" id="downloadImage">导出当前页面 PNG</button><p class="export-note" id="exportStatus" role="status">纯本地 Canvas 绘制，不依赖网络或 SVG foreignObject。从页面顶部开始截取，不包含控制器。微信内可使用图片预览并长按保存。</p><button class="ctrl-button" type="button" id="resetControls">恢复默认设置</button>
-</aside></div><div class="export-preview" id="imagePreview"><div>长按下面的图片即可保存，也可以尝试点击下载</div><img id="previewImage" alt="导出的积分页面"><div><button type="button" id="previewSave">下载图片</button> <button type="button" id="previewClose">关闭预览</button></div></div>
+<button class="ctrl-button export" type="button" id="downloadImage">导出当前页面图片</button><p class="export-note" id="exportStatus" role="status">纯本地 Canvas 绘制，不依赖网络或 SVG foreignObject。从页面顶部开始截取，不包含控制器。微信内自动生成压缩 JPEG 供长按保存；普通浏览器下载 PNG。</p><button class="ctrl-button" type="button" id="resetControls">恢复默认设置</button>
+</aside></div><div class="export-preview" id="imagePreview"><div id="previewTip">长按下面的图片保存；如微信无法保存，请在浏览器中打开本页下载。</div><img id="previewImage" alt="导出的积分页面"><div><button type="button" id="previewSave">下载图片</button> <button type="button" id="previewClose">关闭预览</button></div></div>
 <script>
 const DAILY_POINTS=44;
 const RANK_TITLES=['一心一意','再接再厉','三省吾身','名扬四海','学富五车','六韬三略','七步才华','才高八斗','九天揽月','十年磨剑'];
@@ -264,23 +264,40 @@ function drawPreview(ctx){
  paintTexts(ctx,detail?document.getElementById('detail'):previewRoot);
 }
 function exportDimensions(){const mode=document.getElementById('exportMode').value;if(mode==='original')return [931,2048];if(mode==='custom'){const w=Number(document.getElementById('exportWidth').value),h=Number(document.getElementById('exportHeight').value);if(!Number.isInteger(w)||!Number.isInteger(h)||w<240||w>4096||h<320||h>8192)throw Error('自定义宽高超出范围');return [w,h]}
- const dpr=Math.min(window.devicePixelRatio||1,3);return [Math.round(document.querySelector('.preview-shell').clientWidth*dpr),Math.round(window.innerHeight*dpr)];}
-let previewURL=null,previewName='';
+ const dpr=Math.min(window.devicePixelRatio||1,2);const w=Math.round(document.querySelector('.preview-shell').clientWidth*dpr),h=Math.round(window.innerHeight*dpr);const factor=Math.min(1,Math.sqrt(4000000/(w*h)));return [Math.max(1,Math.round(w*factor)),Math.max(1,Math.round(h*factor))];}
+let previewURL=null,previewName='',previewBlob=null;
+function encodeCanvas(canvas,type,quality){return new Promise((resolve,reject)=>{try{canvas.toBlob(blob=>blob?resolve(blob):reject(Error('图片编码失败')),type,quality)}catch(error){reject(error)}})}
+function blobAsDataURL(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error||Error('图片读取失败'));reader.readAsDataURL(blob)})}
 async function downloadCurrentPage(){
  const button=document.getElementById('downloadImage'),status=document.getElementById('exportStatus');if(button.disabled)return;
  button.disabled=true;button.textContent='正在生成图片…';status.textContent='纯本地 Canvas 绘制中…';
  try{
   if(document.fonts?.ready)await document.fonts.ready;
-  const [w,h]=exportDimensions();const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
-  const ctx=canvas.getContext('2d',{alpha:false});ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.scale(w/931,w/931);drawPreview(ctx);
-  const blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('PNG 编码失败')),'image/png'));
-  if(previewURL)URL.revokeObjectURL(previewURL);previewURL=URL.createObjectURL(blob);
-  const page=document.getElementById('detail').style.display==='block'?'积分明细':'积分中心';previewName=`${page}_${todayISO()}_${w}x${h}.png`;
-  const isWechat=/MicroMessenger/i.test(navigator.userAgent);
+  const [w,h]=exportDimensions();const isWechat=/MicroMessenger/i.test(navigator.userAgent);
+  if(w*h>12000000)throw Error('图片像素过大，请减小自定义尺寸');
+  const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+  const ctx=canvas.getContext('2d',{alpha:false});if(!ctx)throw Error('当前浏览器不支持 Canvas');ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.scale(w/931,w/931);drawPreview(ctx);
+  const page=document.getElementById('detail').style.display==='block'?'积分明细':'积分中心';
+  let blob,ext;
+  if(isWechat){
+   ext='jpg';blob=await encodeCanvas(canvas,'image/jpeg',.82);
+   if(blob.size>8*1024*1024)blob=await encodeCanvas(canvas,'image/jpeg',.62);
+   if(blob.size>24*1024*1024)throw Error('图片过大，请选择原始尺寸或更小的尺寸');
+  }else{ext='png';blob=await encodeCanvas(canvas,'image/png')}
+  previewBlob=blob;previewName=`${page}_${todayISO()}_${w}x${h}.${ext}`;
+  if(previewURL?.startsWith('blob:'))URL.revokeObjectURL(previewURL);
+  // WeChat image long-press is more compatible with a real data:image/jpeg source than blob: URLs.
+  previewURL=isWechat?await blobAsDataURL(blob):URL.createObjectURL(blob);
   document.getElementById('previewImage').src=previewURL;
-  if(isWechat){document.getElementById('imagePreview').classList.add('active');status.textContent=`已生成 ${w} × ${h}，请长按图片保存。`}
-  else{const a=document.createElement('a');a.download=previewName;a.href=previewURL;document.body.append(a);a.click();a.remove();status.textContent=`已生成 ${w} × ${h} PNG。若浏览器未下载，可打开图片预览长按保存。`;}
- }catch(e){status.textContent='导出失败：'+e.message;console.error(e)}finally{button.disabled=false;button.textContent='导出当前页面 PNG'}
+  if(isWechat){
+   document.getElementById('previewTip').textContent='请长按图片保存（已压缩为 JPEG）。如果微信仍提示无法保存，可在右上角菜单选择在浏览器打开。';
+   document.getElementById('imagePreview').classList.add('active');
+   status.textContent=`已生成 ${w} × ${h} JPEG，大小 ${(blob.size/1048576).toFixed(2)} MB。`;
+  }else{
+   const a=document.createElement('a');a.download=previewName;a.href=previewURL;document.body.append(a);a.click();a.remove();
+   status.textContent=`已生成 ${w} × ${h} PNG，大小 ${(blob.size/1048576).toFixed(2)} MB。`;
+  }
+ }catch(e){status.textContent='导出失败：'+e.message;console.error(e)}finally{button.disabled=false;button.textContent='导出当前页面图片'}
 }
 const panel=document.getElementById('controller'),backdrop=document.getElementById('panelBackdrop');
 function openPanel(){panel.classList.remove('is-hidden');backdrop.classList.add('is-visible')}
@@ -291,7 +308,7 @@ document.getElementById('closeController').addEventListener('click',closePanel);
 document.getElementById('exportMode').addEventListener('change',e=>{document.getElementById('customExportSize').hidden=e.target.value!=='custom'});
 document.getElementById('downloadImage').addEventListener('click',downloadCurrentPage);
 document.getElementById('previewClose').addEventListener('click',()=>document.getElementById('imagePreview').classList.remove('active'));
-document.getElementById('previewSave').addEventListener('click',()=>{if(!previewURL)return;const a=document.createElement('a');a.href=previewURL;a.download=previewName;document.body.append(a);a.click();a.remove()});
+document.getElementById('previewSave').addEventListener('click',()=>{if(!previewURL)return;const url=previewBlob?URL.createObjectURL(previewBlob):previewURL;const a=document.createElement('a');a.href=url;a.download=previewName;document.body.append(a);a.click();a.remove();if(url.startsWith('blob:'))setTimeout(()=>URL.revokeObjectURL(url),30000)});
 window.addEventListener('resize',fit);
 initControls();fit();
 if(location.hash==='#detail'){renderDetails();document.getElementById('detail').style.display='block';fit();}
